@@ -18,9 +18,9 @@
 ## Highlights
 
 - **Zero External Dependencies**: Built entirely using Python's standard library (`math`, `re`, `collections`, `typing`).
-- **TF-IDF + Cosine Similarity**: Vector space retrieval with sublinear TF scaling ($1 + \ln(\text{tf})$) and inverse document frequency.
+- **TF-IDF + Cosine Similarity**: Vector space retrieval with sublinear TF scaling $(1 + \ln(\text{tf}))$ and inverse document frequency.
 - **BM25 (Okapi / Robertson-Sparck Jones)**: Industry-standard probabilistic lexical ranking with term-frequency saturation ($k_1$) and document-length normalization ($b$).
-- **Hybrid Search via RRF**: Reciprocal Rank Fusion ($1 / (k + \text{rank})$) combining sparse TF-IDF and BM25 signals (purely lexical, stdlib-only). Includes a standalone fusion helper to combine external dense vector embeddings.
+- **Hybrid Search via RRF**: Reciprocal Rank Fusion $(1 / (k + \text{rank}))$ combining sparse TF-IDF and BM25 signals (purely lexical, stdlib-only). Includes a standalone fusion helper to combine external dense vector embeddings.
 - **Single-File Drop-in or Package**: Use `mini_ir.py` directly in your project or install via `pip`.
 - **Fast & Fully Tested**: 100% test coverage running in under 25ms using Python's built-in `unittest`.
 
@@ -70,38 +70,66 @@
 ## How It Works (The Mathematics)
 
 ### 1. TF-IDF Vector Space Model
-For a query term $t$ and document $d$:
+In the **Vector Space Model**, documents and queries are mapped into sparse vector representations over the corpus vocabulary.
 
-$$\text{TF}(t, d) = 1 + \ln(\text{freq}(t, d)) \quad \text{for } \text{freq} > 0$$
+#### Sublinear Term Frequency (TF)
+Raw term frequency $f(t, d)$ (the number of times term $t$ appears in document $d$) grows linearly with count. However, relevance typically scales logarithmically rather than linearly. We apply **sublinear log-scaling**:
+
+$$\text{TF}(t, d) = \begin{cases} 1 + \ln(f(t, d)) & \text{if } f(t, d) > 0 \\ 0 & \text{if } f(t, d) = 0 \end{cases}$$
+
+#### Inverse Document Frequency (IDF)
+Terms appearing across almost all documents carry little discriminatory power, whereas rare terms provide high information value. For a corpus of $N$ documents where $\text{df}(t)$ documents contain term $t$:
 
 $$\text{IDF}(t) = \ln\left(\frac{N}{\text{df}(t)}\right)$$
 
-Document and query vectors are scored via **Cosine Similarity**:
+*(Out-of-vocabulary terms where $\text{df}(t) = 0$ receive $\text{IDF}(t) = 0.0$)*.
 
-$$\text{CosineSim}(\vec{q}, \vec{d}) = \frac{\vec{q} \cdot \vec{d}}{\|\vec{q}\| \|\vec{d}\|}$$
+#### Composite TF-IDF Weight
+The composite weight of term $t$ in document $d$ (and query $q$) is:
+
+$$w(t, d) = \text{TF}(t, d) \cdot \text{IDF}(t)$$
+
+#### Cosine Similarity
+Relevance between query vector $\vec{q}$ and document vector $\vec{d}$ is computed using cosine similarity, providing length-normalized scoring bounded in $[0.0, 1.0]$:
+
+$$\text{CosineSim}(\vec{q}, \vec{d}) = \frac{\vec{q} \cdot \vec{d}}{\|\vec{q}\|_2 \|\vec{d}\|_2} = \frac{\sum_{t \in q \cap d} w(t, q) \cdot w(t, d)}{\sqrt{\sum_{t \in q} w(t, q)^2} \cdot \sqrt{\sum_{t \in d} w(t, d)^2}}$$
+
+If $\|\vec{q}\|_2 = 0$ or $\|\vec{d}\|_2 = 0$, similarity is defined as $0.0$.
 
 ---
 
-### 2. BM25 (Robertson-Sparck Jones)
-BM25 addresses TF-IDF's lack of term saturation and length normalization:
+### 2. BM25 (Okapi / Robertson-Sparck Jones)
+While TF-IDF uses simple logarithmic scaling, **BM25** introduces an asymptotic term-frequency saturation curve and explicit document length normalization.
+
+For a query $Q$ with terms $t$ and document $D$:
 
 $$\text{Score}_{\text{BM25}}(D, Q) = \sum_{t \in Q} \text{IDF}_{\text{BM25}}(t) \cdot \frac{f(t, D) \cdot (k_1 + 1)}{f(t, D) + k_1 \cdot \left(1 - b + b \cdot \frac{|D|}{\text{avgdl}}\right)}$$
 
 where:
-- $k_1$ controls term frequency saturation (default `1.5`).
-- $b$ controls length normalization penalty (default `0.75`).
-- Smoothed IDF guarantees positive scores:
+- $f(t, D)$: Raw occurrence count of term $t$ in document $D$.
+- $|D| = \text{dl}$: Length of document $D$ (in tokens).
+- $\text{avgdl}$: Average document length across the entire corpus: $\frac{1}{N} \sum_{i=1}^N |D_i|$.
+- $k_1$: Term frequency saturation parameter ($k_1 \ge 0$, default `1.5`). Controls how quickly term frequency saturation sets in. As $f(t, D) \to \infty$, the term-frequency component asymptotes to $k_1 + 1$.
+- $b$: Document length normalization parameter ($0 \le b \le 1$, default `0.75`). At $b = 1$, documents are penalized in direct proportion to their length relative to $\text{avgdl}$; at $b = 0$, length normalization is completely disabled.
+
+#### Smoothed Non-Negative BM25 IDF
+Standard Robertson-Sparck Jones IDF can produce negative scores for terms appearing in more than half of all documents ($\text{df}(t) > N/2$). We use the smoothed formulation standard in modern search engines:
 
 $$\text{IDF}_{\text{BM25}}(t) = \ln\left(\frac{N - \text{df}(t) + 0.5}{\text{df}(t) + 0.5} + 1\right)$$
+
+The $+1$ floor inside the logarithm guarantees that $\text{IDF}_{\text{BM25}}(t) > 0$ for all terms, ensuring frequent matching terms never subtract from relevance.
 
 ---
 
 ### 3. Reciprocal Rank Fusion (RRF)
-RRF combines disparate ranking systems without requiring calibrated probabilities or score normalization:
+Directly adding raw scores from disparate ranking models (e.g. $[0, 1]$ cosine similarity and $[0, \infty)$ BM25 scores) produces biased results without fragile per-corpus calibration. **Reciprocal Rank Fusion (RRF)** (Cormack et al., SIGIR 2009) operates purely on ordinal ranked positions:
 
 $$\text{Score}_{\text{RRF}}(d) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
 
-where $r_m(d)$ is the rank position (1-indexed) of document $d$ in system $m$, and $k$ is a smoothing constant (standard default `60`).
+where:
+- $M$: Set of ranking systems being combined (e.g., $\{\text{TF-IDF}, \text{BM25}\}$ or $\{\text{Dense Vector}, \text{BM25}\}$).
+- $r_m(d) \in \{1, 2, \dots, N\}$: 1-based rank position of document $d$ in the output of model $m$.
+- $k$: Rank smoothing constant (standard default `60`), which dampens the impact of extreme high rankings while rewarding documents consistently retrieved across multiple independent models.
 
 ---
 
