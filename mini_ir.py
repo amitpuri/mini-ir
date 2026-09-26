@@ -20,7 +20,8 @@ import math
 import re
 import sys
 from collections import Counter, defaultdict
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+import warnings
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 STOPWORDS: Set[str] = {
     "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to",
@@ -126,6 +127,15 @@ class IRIndex:
         self.doc_lengths: List[int] = [len(toks) for toks in self.doc_tokens]
         self.avg_doc_length: float = sum(self.doc_lengths) / self.N
 
+        if self.avg_doc_length == 0.0:
+            warnings.warn(
+                "All documents produced zero tokens after preprocessing "
+                "(every token was a stopword or filtered out). "
+                "BM25 length normalization will be effectively disabled.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         self.k1: float = bm25_k1   # BM25 term-frequency saturation constant
         self.b: float = bm25_b      # BM25 length-normalization strength (0=off, 1=full)
 
@@ -140,6 +150,16 @@ class IRIndex:
             t: math.log((self.N - df + 0.5) / (df + 0.5) + 1.0)
             for t, df in self.df.items()
         }
+
+        # Precompute TF-IDF document vectors and their L2 norms once at build time
+        # so repeated search_tfidf calls don't recompute them per query.
+        self._doc_tfidf_vecs: List[Dict[str, float]] = [
+            self._tfidf_vector(tf, self.idf_tfidf) for tf in self.doc_term_freqs
+        ]
+        self._doc_tfidf_norms: List[float] = [
+            math.sqrt(sum(v * v for v in vec.values()))
+            for vec in self._doc_tfidf_vecs
+        ]
 
     def _document_frequencies(self) -> Dict[str, int]:
         """How many documents contain each term."""
@@ -175,6 +195,13 @@ class IRIndex:
         """
         Rank documents using TF-IDF vectors and cosine similarity.
 
+        Query terms that are out-of-vocabulary (not seen during indexing) receive
+        an IDF of 0.0 and contribute nothing to the score. This is intentional:
+        unknown terms carry no information about the indexed corpus.
+
+        Document TF-IDF vectors and their L2 norms are precomputed at index build
+        time and reused here, so repeated queries do not recompute them.
+
         Args:
             query: The search query string.
             top_k: Maximum number of ranked results to return.
@@ -187,11 +214,16 @@ class IRIndex:
 
         query_terms = Counter(preprocess(query, self.stopwords, self.tokenizer))
         query_vec = self._tfidf_vector(query_terms, self.idf_tfidf)
+        query_norm = math.sqrt(sum(v * v for v in query_vec.values()))
 
         scores: List[Tuple[int, float]] = []
-        for doc_id, term_freqs in enumerate(self.doc_term_freqs):
-            doc_vec = self._tfidf_vector(term_freqs, self.idf_tfidf)
-            score = self._cosine_similarity(query_vec, doc_vec)
+        for doc_id, doc_vec in enumerate(self._doc_tfidf_vecs):
+            common_terms = set(query_vec) & set(doc_vec)
+            if not common_terms or query_norm == 0.0 or self._doc_tfidf_norms[doc_id] == 0.0:
+                scores.append((doc_id, 0.0))
+                continue
+            dot = sum(query_vec[t] * doc_vec[t] for t in common_terms)
+            score = dot / (query_norm * self._doc_tfidf_norms[doc_id])
             scores.append((doc_id, score))
 
         scores.sort(key=lambda x: x[1], reverse=True)
@@ -213,7 +245,10 @@ class IRIndex:
         if top_k <= 0:
             return []
 
-        query_terms = preprocess(query, self.stopwords, self.tokenizer)
+        # Deduplicate query terms: BM25 scores each unique term once against a document.
+        # Without deduplication, repeated terms in the query (e.g. "cat cat dog") would
+        # be counted multiple times, inflating scores incorrectly.
+        query_terms = list(dict.fromkeys(preprocess(query, self.stopwords, self.tokenizer)))
         scores: List[Tuple[int, float]] = []
 
         for doc_id, term_freqs in enumerate(self.doc_term_freqs):
@@ -267,9 +302,20 @@ class IRIndex:
         """
         Serialize index parameters and documents to a JSON file.
 
+        Note: Custom tokenizers are not serializable and will not be saved.
+        When loading this index with ``IRIndex.load_json``, pass the same
+        tokenizer explicitly to reproduce identical results.
+
         Args:
             filepath: Destination file path.
         """
+        if self.tokenizer is not None:
+            warnings.warn(
+                "This index was built with a custom tokenizer, which cannot be serialized to JSON. "
+                "Pass the same tokenizer to IRIndex.load_json() to reproduce identical results.",
+                UserWarning,
+                stacklevel=2,
+            )
         data = {
             "documents": self.documents,
             "bm25_k1": self.k1,

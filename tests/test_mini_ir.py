@@ -208,9 +208,11 @@ class TestCLIAndDemo(unittest.TestCase):
         self.assertIn("TF-IDF ranking", output)
 
     def test_main_cli_with_custom_file(self):
+        import os
         with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as f:
             f.write("First custom document line.\nSecond custom document line.\n")
             f_path = f.name
+        self.addCleanup(os.unlink, f_path)
 
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -218,6 +220,8 @@ class TestCLIAndDemo(unittest.TestCase):
         self.assertEqual(code, 0)
         output = buf.getvalue()
         self.assertIn("BM25 ranking", output)
+
+
 class TestStandaloneRRF(unittest.TestCase):
     def test_standalone_rrf(self):
         dense_results = [(0, 0.95), (1, 0.85), (2, 0.70)]
@@ -234,11 +238,13 @@ class TestStandaloneRRF(unittest.TestCase):
 
 class TestPersistence(unittest.TestCase):
     def test_save_and_load_json(self):
+        import os
         corpus = ["First document text", "Second document text"]
         idx1 = IRIndex(corpus, bm25_k1=1.2, bm25_b=0.8)
 
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
             f_path = f.name
+        self.addCleanup(os.unlink, f_path)
 
         idx1.save_json(f_path)
         idx2 = IRIndex.load_json(f_path)
