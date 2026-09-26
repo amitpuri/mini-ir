@@ -15,11 +15,12 @@ Run directly to see a demo: `python mini_ir.py`
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import sys
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 STOPWORDS: Set[str] = {
     "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to",
@@ -33,10 +34,53 @@ def tokenize(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", text)
 
 
-def preprocess(text: str, stopwords: Optional[Set[str]] = None) -> List[str]:
-    """Tokenize and strip stopwords (uses default STOPWORDS if none provided)."""
+def preprocess(
+    text: str,
+    stopwords: Optional[Set[str]] = None,
+    tokenizer: Optional[Callable[[str], List[str]]] = None,
+) -> List[str]:
+    """
+    Tokenize and strip stopwords.
+
+    Args:
+        text: Input raw string.
+        stopwords: Optional custom set of stopwords (defaults to STOPWORDS).
+        tokenizer: Optional callable tokenizer (defaults to built-in alphanumeric tokenize).
+    """
+    tok_fn = tokenizer if tokenizer is not None else tokenize
     sw = STOPWORDS if stopwords is None else stopwords
-    return [t for t in tokenize(text) if t not in sw]
+    return [t for t in tok_fn(text) if t not in sw]
+
+
+def reciprocal_rank_fusion(
+    rankings: List[List[Tuple[int, float]]],
+    k: int = 60,
+    top_k: int = 5,
+) -> List[Tuple[int, float]]:
+    """
+    Fuse multiple ranked lists using Reciprocal Rank Fusion (RRF):
+    score(d) = sum_{ranking} (1 / (k + rank)).
+
+    Works with any arbitrary rankers (e.g. BM25 + TF-IDF, or external dense embeddings + BM25).
+
+    Args:
+        rankings: List of ranked lists, where each list contains (doc_id, score) tuples.
+        k: Smoothing constant to control impact of top-ranked items (default: 60).
+        top_k: Maximum number of fused results to return.
+
+    Returns:
+        List of (doc_id, fused_score) sorted by fused score in descending order.
+    """
+    if top_k <= 0:
+        return []
+
+    rrf_scores: Dict[int, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, (doc_id, _) in enumerate(ranking, start=1):
+            rrf_scores[doc_id] += 1.0 / (k + rank)
+
+    fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    return fused[:top_k]
 
 
 class IRIndex:
@@ -52,6 +96,7 @@ class IRIndex:
         bm25_k1: float = 1.5,
         bm25_b: float = 0.75,
         stopwords: Optional[Set[str]] = None,
+        tokenizer: Optional[Callable[[str], List[str]]] = None,
     ) -> None:
         """
         Initialize the Information Retrieval index with a collection of documents.
@@ -61,6 +106,7 @@ class IRIndex:
             bm25_k1: BM25 term-frequency saturation constant (default: 1.5).
             bm25_b: BM25 document length normalization strength, 0=off, 1=full (default: 0.75).
             stopwords: Optional custom set of stopwords to filter during preprocessing.
+            tokenizer: Optional custom tokenizer function (str -> List[str]).
         """
         if not documents:
             raise ValueError("Document corpus cannot be empty.")
@@ -71,8 +117,11 @@ class IRIndex:
 
         self.documents: List[str] = list(documents)
         self.stopwords: Optional[Set[str]] = stopwords
+        self.tokenizer: Optional[Callable[[str], List[str]]] = tokenizer
         self.N: int = len(documents)
-        self.doc_tokens: List[List[str]] = [preprocess(doc, self.stopwords) for doc in documents]
+        self.doc_tokens: List[List[str]] = [
+            preprocess(doc, self.stopwords, self.tokenizer) for doc in documents
+        ]
         self.doc_term_freqs: List[Counter] = [Counter(toks) for toks in self.doc_tokens]
         self.doc_lengths: List[int] = [len(toks) for toks in self.doc_tokens]
         self.avg_doc_length: float = sum(self.doc_lengths) / self.N
@@ -136,7 +185,7 @@ class IRIndex:
         if top_k <= 0:
             return []
 
-        query_terms = Counter(preprocess(query, self.stopwords))
+        query_terms = Counter(preprocess(query, self.stopwords, self.tokenizer))
         query_vec = self._tfidf_vector(query_terms, self.idf_tfidf)
 
         scores: List[Tuple[int, float]] = []
@@ -164,7 +213,7 @@ class IRIndex:
         if top_k <= 0:
             return []
 
-        query_terms = preprocess(query, self.stopwords)
+        query_terms = preprocess(query, self.stopwords, self.tokenizer)
         scores: List[Tuple[int, float]] = []
 
         for doc_id, term_freqs in enumerate(self.doc_term_freqs):
@@ -194,9 +243,7 @@ class IRIndex:
         Fuse TF-IDF and BM25 rankings using Reciprocal Rank Fusion (RRF):
         score(d) = sum(1 / (k + rank)).
 
-        Same mechanic used to fuse dense (vector) + sparse (BM25) retrieval
-        in production hybrid search -- here applied to two lexical methods
-        to keep everything runnable without an embedding model.
+        Combines two lexical signals without requiring score normalization.
 
         Args:
             query: The search query string.
@@ -212,14 +259,52 @@ class IRIndex:
         tfidf_ranked = self.search_tfidf(query, top_k=self.N)
         bm25_ranked = self.search_bm25(query, top_k=self.N)
 
-        rrf_scores: Dict[int, float] = defaultdict(float)
-        for rank, (doc_id, _) in enumerate(tfidf_ranked, start=1):
-            rrf_scores[doc_id] += 1.0 / (k + rank)
-        for rank, (doc_id, _) in enumerate(bm25_ranked, start=1):
-            rrf_scores[doc_id] += 1.0 / (k + rank)
+        return reciprocal_rank_fusion([tfidf_ranked, bm25_ranked], k=k, top_k=top_k)
 
-        fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        return fused[:top_k]
+    # ---------------- Serialization ----------------
+
+    def save_json(self, filepath: str) -> None:
+        """
+        Serialize index parameters and documents to a JSON file.
+
+        Args:
+            filepath: Destination file path.
+        """
+        data = {
+            "documents": self.documents,
+            "bm25_k1": self.k1,
+            "bm25_b": self.b,
+            "stopwords": list(self.stopwords) if self.stopwords is not None else None,
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def load_json(
+        cls,
+        filepath: str,
+        tokenizer: Optional[Callable[[str], List[str]]] = None,
+    ) -> IRIndex:
+        """
+        Load and rebuild an IRIndex from a JSON file.
+
+        Args:
+            filepath: Source file path.
+            tokenizer: Optional custom tokenizer callable to attach to reconstructed index.
+
+        Returns:
+            Reconstituted IRIndex instance.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sw = set(data["stopwords"]) if data.get("stopwords") is not None else None
+        return cls(
+            documents=data["documents"],
+            bm25_k1=data.get("bm25_k1", 1.5),
+            bm25_b=data.get("bm25_b", 0.75),
+            stopwords=sw,
+            tokenizer=tokenizer,
+        )
 
 
 # ---------------------------- CLI & Demo ----------------------------
@@ -281,23 +366,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=str,
         help="Optional path to a newline-delimited text file containing documents.",
     )
+    parser.add_argument(
+        "--save",
+        type=str,
+        help="Save indexed corpus configuration to JSON file.",
+    )
+    parser.add_argument(
+        "--load",
+        type=str,
+        help="Load index configuration from JSON file instead of re-indexing raw file/corpus.",
+    )
 
     args = parser.parse_args(argv)
 
-    if args.file:
+    if args.load:
+        try:
+            index = IRIndex.load_json(args.load)
+            corpus = index.documents
+        except Exception as e:
+            print(f"Error loading index from '{args.load}': {e}", file=sys.stderr)
+            return 1
+    elif args.file:
         try:
             with open(args.file, "r", encoding="utf-8") as f:
                 corpus = [line.strip() for line in f if line.strip()]
             if not corpus:
                 print(f"Error: file '{args.file}' contained no documents.", file=sys.stderr)
                 return 1
+            index = IRIndex(corpus)
         except Exception as e:
             print(f"Error reading file '{args.file}': {e}", file=sys.stderr)
             return 1
     else:
         corpus = DEMO_CORPUS
+        index = IRIndex(corpus)
 
-    index = IRIndex(corpus)
+    if args.save:
+        try:
+            index.save_json(args.save)
+            print(f"Index successfully saved to '{args.save}'.")
+        except Exception as e:
+            print(f"Error saving index to '{args.save}': {e}", file=sys.stderr)
+            return 1
+
     print(f"Query: {args.query!r}\n")
 
     if args.method in ("all", "tfidf"):
@@ -323,7 +434,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    # If no arguments provided, run default demo seamlessly
     if len(sys.argv) == 1:
         run_demo()
     else:

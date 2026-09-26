@@ -20,7 +20,7 @@
 - **Zero External Dependencies**: Built entirely using Python's standard library (`math`, `re`, `collections`, `typing`).
 - **TF-IDF + Cosine Similarity**: Vector space retrieval with sublinear TF scaling ($1 + \ln(\text{tf})$) and inverse document frequency.
 - **BM25 (Okapi / Robertson-Sparck Jones)**: Industry-standard probabilistic lexical ranking with term-frequency saturation ($k_1$) and document-length normalization ($b$).
-- **Hybrid Search via RRF**: Reciprocal Rank Fusion ($1 / (k + \text{rank})$) combining sparse TF-IDF and BM25 signals — the same fusion algorithm used in production vector + lexical hybrid RAG pipelines.
+- **Hybrid Search via RRF**: Reciprocal Rank Fusion ($1 / (k + \text{rank})$) combining sparse TF-IDF and BM25 signals (purely lexical, stdlib-only). Includes a standalone fusion helper to combine external dense vector embeddings.
 - **Single-File Drop-in or Package**: Use `mini_ir.py` directly in your project or install via `pip`.
 - **Fast & Fully Tested**: 100% test coverage running in under 25ms using Python's built-in `unittest`.
 
@@ -221,10 +221,41 @@ No test dependencies needed (`pytest` is also fully compatible).
 
 ---
 
+## Scope, Architectural Limits & Trade-offs
+
+`mini-ir` is intentionally designed as an educational, zero-dependency reference implementation. Before using it beyond prototyping, be aware of its deliberate design boundaries:
+
+1. **Purely Lexical (No Dense Vector Retrieval Built-in)**:
+   - `mini-ir` implements sparse, lexical algorithms (TF-IDF and BM25) and fuses them using Reciprocal Rank Fusion (RRF).
+   - There are **no dense embedding models, neural encoders, or vector DBs bundled** in this library (preserving the zero-dependency standard).
+   - However, the standalone function `reciprocal_rank_fusion` can fuse external embedding rank lists (e.g. OpenAI, Cohere, or SentenceTransformers) with BM25. See [`examples/dense_hybrid_fusion.py`](examples/dense_hybrid_fusion.py).
+
+2. **Linear Corpus Scoring ($O(N)$) vs. Inverted Index**:
+   - Query evaluation computes scores by iterating over document statistics sequentially.
+   - There is no inverted postings list traversal or early termination heuristic (e.g., WAND or Block-Max WAND).
+   - For educational exploration, unit testing, and corpora up to tens of thousands of documents, this executes in milliseconds, but it is not intended for multi-million document production scale.
+
+3. **In-Memory & Index Mutation**:
+   - Document frequencies and vectors reside in-memory.
+   - Adding new documents dynamically requires re-indexing because global corpus statistics ($N$, $\text{avgdl}$, $\text{df}$) change.
+   - Persistence is supported via JSON export/import (`IRIndex.save_json` and `IRIndex.load_json`).
+
+4. **Regex Preprocessing & Language Support**:
+   - Default tokenization uses a simple regex `[a-z0-9]+` and a hardcoded English stopword list.
+   - Non-segmenting languages (CJK: Chinese, Japanese) and RTL scripts are not handled out of the box.
+   - There is no stemming (Porter/Snowball) or lemmatization, so "running" and "run" remain separate terms.
+   - You can pass a custom tokenizer callable into `IRIndex(documents, tokenizer=custom_fn)` to plug in custom segmenters.
+
+5. **Memory Footprint**:
+   - Per-document term counts are stored as standard Python `Counter` and dictionary structures ($O(N \cdot V)$ memory overhead without compression).
+
+---
+
 ## Examples
 
 Explore ready-to-run examples in the [`examples/`](examples/) directory:
 - [`examples/quickstart.py`](examples/quickstart.py): Basic walkthrough of TF-IDF, BM25, and RRF.
+- [`examples/dense_hybrid_fusion.py`](examples/dense_hybrid_fusion.py): Fusing external dense embeddings with BM25 via standalone `reciprocal_rank_fusion`.
 - [`examples/search_custom_files.py`](examples/search_custom_files.py): Indexing technical notes and custom knowledge base entries.
 
 ---

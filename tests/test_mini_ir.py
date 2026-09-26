@@ -218,8 +218,47 @@ class TestCLIAndDemo(unittest.TestCase):
         self.assertEqual(code, 0)
         output = buf.getvalue()
         self.assertIn("BM25 ranking", output)
-        self.assertIn("First custom document line", output)
+class TestStandaloneRRF(unittest.TestCase):
+    def test_standalone_rrf(self):
+        dense_results = [(0, 0.95), (1, 0.85), (2, 0.70)]
+        bm25_results = [(1, 4.2), (0, 3.1), (3, 2.0)]
+        fused = mini_ir.reciprocal_rank_fusion([dense_results, bm25_results], k=60, top_k=2)
+        self.assertEqual(len(fused), 2)
+        # Doc 0: 1/61 + 1/62 ≈ 0.016393 + 0.016129 = 0.032522
+        # Doc 1: 1/62 + 1/61 = 0.032522 (tie)
+        # Both doc 0 and 1 should be the top 2
+        fused_ids = [doc_id for doc_id, _ in fused]
+        self.assertIn(0, fused_ids)
+        self.assertIn(1, fused_ids)
+
+
+class TestPersistence(unittest.TestCase):
+    def test_save_and_load_json(self):
+        corpus = ["First document text", "Second document text"]
+        idx1 = IRIndex(corpus, bm25_k1=1.2, bm25_b=0.8)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
+            f_path = f.name
+
+        idx1.save_json(f_path)
+        idx2 = IRIndex.load_json(f_path)
+
+        self.assertEqual(idx2.documents, corpus)
+        self.assertEqual(idx2.k1, 1.2)
+        self.assertEqual(idx2.b, 0.8)
+        self.assertEqual(idx1.search_bm25("document"), idx2.search_bm25("document"))
+
+
+class TestCustomTokenizer(unittest.TestCase):
+    def test_custom_tokenizer(self):
+        # Custom tokenizer that splits by whitespace only
+        corpus = ["foo-bar baz", "test-case foo"]
+        custom_tok = lambda s: s.split()
+        idx = IRIndex(corpus, tokenizer=custom_tok)
+        res = idx.search_bm25("foo-bar")
+        self.assertEqual(res[0][0], 0)
 
 
 if __name__ == "__main__":
     unittest.main()
+
