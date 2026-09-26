@@ -99,7 +99,7 @@ $$\text{IDF}_{\text{BM25}}(t) = \ln\left(\frac{N - \text{df}(t) + 0.5}{\text{df}
 ### 3. Reciprocal Rank Fusion (RRF)
 RRF combines disparate ranking systems without requiring calibrated probabilities or score normalization:
 
-$$\text{RRF\_Score}(d) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
+$$\text{Score}_{\text{RRF}}(d) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
 
 where $r_m(d)$ is the rank position (1-indexed) of document $d$ in system $m$, and $k$ is a smoothing constant (standard default `60`).
 
