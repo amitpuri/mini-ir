@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-ir"
+version = "0.1.0"
+description = "A minimal, zero-dependency Information Retrieval engine from scratch in pure Python (TF-IDF, BM25, and Reciprocal Rank Fusion)."
+readme = "README.md"
+authors = [
+    { name = "Amit Puri", email = "amitpuri.pro@gmail.com" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = [
+    "information-retrieval",
+    "search-engine",
+    "bm25",
+    "tf-idf",
+    "rrf",
+    "reciprocal-rank-fusion",
+    "hybrid-search",
+    "nlp",
+    "zero-dependency",
+    "rag"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/amitpuri/mini-ir"
+Repository = "https://github.com/amitpuri/mini-ir"
+Issues = "https://github.com/amitpuri/mini-ir/issues"
+
+[project.scripts]
+mini-ir = "mini_ir:main"
+
+[tool.setuptools]
+py-modules = ["mini_ir"]
